@@ -5,6 +5,7 @@ const STORAGE = {
   bookmarks: 'noor-bookmarks',
   progress: 'noor-progress',
   reciter: 'noor-reciter',
+  playbackMode: 'noor-playback-mode',
 }
 const reciters = [
   { id: 'ar.alafasy', name: 'Mishary Alafasy' },
@@ -40,6 +41,7 @@ const state = {
   showTransliteration: true,
   fontSize: 34,
   reciter: localStorage.getItem(STORAGE.reciter) || reciters[0].id,
+  playbackMode: localStorage.getItem(STORAGE.playbackMode) === 'verse' ? 'verse' : 'surah',
   bookmarks: new Set(readJSON(STORAGE.bookmarks, [])),
   loading: false,
   error: '',
@@ -163,6 +165,7 @@ function renderShell() {
       </div>
       <div class="player-options">
         ${icon('volume')}
+        <select id="playback-mode-select" aria-label="Playback mode"><option value="surah">Full surah</option><option value="verse">Single verse</option></select>
         <select id="reciter-select" aria-label="Choose reciter">${reciters.map((reciter) => `<option value="${reciter.id}">${escapeHtml(reciter.name)}</option>`).join('')}</select>
         <select id="speed-select" aria-label="Playback speed"><option value="1">1×</option><option value="0.75">0.75×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select>
       </div>
@@ -170,6 +173,7 @@ function renderShell() {
     <div class="mobile-scrim" data-action="close-mobile-nav"></div>
   `
   document.querySelector('#reciter-select').value = state.reciter
+  document.querySelector('#playback-mode-select').value = state.playbackMode
   document.querySelector('#text-size').value = state.fontSize
 }
 
@@ -369,6 +373,14 @@ function renderPlayer() {
   document.querySelector('#audio-progress').value = audio.duration ? Math.round((audio.currentTime / audio.duration) * 1000) : 0
   document.querySelector('#current-time').textContent = formatTime(audio.currentTime)
   document.querySelector('#duration-time').textContent = formatTime(audio.duration)
+  if ('mediaSession' in navigator && 'MediaMetadata' in window) {
+    const reciter = reciters.find((item) => item.id === state.reciter)?.name || 'Quran recitation'
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: `${surah?.englishName || 'Quran'}${verse ? ` · Verse ${verse.number}` : ''}`,
+      artist: reciter,
+      album: 'Noor Quran Reader',
+    })
+  }
 }
 
 function formatTime(seconds) {
@@ -502,6 +514,10 @@ document.querySelector('#reciter-select').addEventListener('change', (event) => 
 document.querySelector('#speed-select').addEventListener('change', (event) => {
   audio.playbackRate = Number(event.target.value)
 })
+document.querySelector('#playback-mode-select').addEventListener('change', (event) => {
+  state.playbackMode = event.target.value === 'verse' ? 'verse' : 'surah'
+  localStorage.setItem(STORAGE.playbackMode, state.playbackMode)
+})
 document.querySelector('#audio-progress').addEventListener('input', (event) => {
   if (Number.isFinite(audio.duration)) audio.currentTime = (Number(event.target.value) / 1000) * audio.duration
 })
@@ -514,10 +530,12 @@ document.addEventListener('keydown', (event) => {
 })
 
 audio.addEventListener('play', () => {
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'
   renderPlayer()
   renderReader()
 })
 audio.addEventListener('pause', () => {
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'
   renderPlayer()
   renderReader()
 })
@@ -530,8 +548,9 @@ audio.addEventListener('timeupdate', () => {
   if (durationTime) durationTime.textContent = formatTime(audio.duration)
 })
 audio.addEventListener('ended', () => {
-  if (state.activeVerse < state.verses.length) playVerse(state.activeVerse + 1)
+  if (state.playbackMode === 'surah' && state.activeVerse < state.verses.length) playVerse(state.activeVerse + 1)
   else {
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none'
     updateActiveVerse(state.activeVerse, false)
     renderReader()
     renderPlayer()
@@ -540,6 +559,23 @@ audio.addEventListener('ended', () => {
 audio.addEventListener('error', () => {
   document.querySelector('#reader-message').innerHTML = '<div class="reader-state error-state">This recitation could not be played. Choose another reciter or try again.</div>'
 })
+
+if ('mediaSession' in navigator) {
+  const mediaActions = {
+    play: () => playVerse(state.activeVerse),
+    pause: () => audio.pause(),
+    previoustrack: () => playVerse(Math.max(1, state.activeVerse - 1)),
+    nexttrack: () => playVerse(Math.min(state.verses.length, state.activeVerse + 1)),
+    seekto: (details) => {
+      if (Number.isFinite(details.seekTime)) audio.currentTime = details.seekTime
+    },
+  }
+  for (const [action, handler] of Object.entries(mediaActions)) {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler)
+    } catch {}
+  }
+}
 
 renderPlayer()
 renderReader()

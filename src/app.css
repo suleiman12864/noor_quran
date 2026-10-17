@@ -220,6 +220,7 @@ input[type="range"] { accent-color: var(--forest-soft); cursor: pointer; }
 .player-options { display: flex; align-items: center; justify-content: flex-end; gap: 8px; color: #77847a; }
 .player-options > .icon { width: 16px; height: 16px; }
 .player-options select { max-width: 148px; min-height: 31px; padding: 0 20px 0 6px; border: 1px solid #e0e1d8; border-radius: 4px; color: #53635a; background: transparent; font-size: 9px; }
+.player-options #playback-mode-select { max-width: 105px; }
 .player-options select:last-child { width: 57px; }
 .mobile-scrim { display: none; }
 
@@ -231,7 +232,7 @@ input[type="range"] { accent-color: var(--forest-soft); cursor: pointer; }
 @media (max-width: 1000px) {
   .sidebar { width: 254px; flex-basis: 254px; }
   .reader-area { padding-right: 28px; padding-left: 28px; }
-  .audio-player { grid-template-columns: minmax(150px, 0.8fr) minmax(230px, 1.2fr) minmax(170px, 0.8fr); gap: 12px; padding-right: 20px; padding-left: 20px; }
+  .audio-player { grid-template-columns: minmax(150px, 0.8fr) minmax(230px, 1.2fr) minmax(230px, 0.8fr); gap: 12px; padding-right: 20px; padding-left: 20px; }
   .player-options select { max-width: 116px; }
 }
 
@@ -274,6 +275,7 @@ input[type="range"] { accent-color: var(--forest-soft); cursor: pointer; }
   .player-options { grid-column: 2; grid-row: 1; }
   .player-options > .icon { display: none; }
   .player-options select { max-width: 122px; min-height: 29px; font-size: 8px; }
+  .player-options #playback-mode-select { max-width: 88px; }
   .player-options select:last-child { width: 52px; }
   .player-center { width: 100%; grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-columns: 132px 1fr; align-items: center; gap: 12px; }
   .transport-controls { gap: 11px; }
@@ -288,7 +290,8 @@ input[type="range"] { accent-color: var(--forest-soft); cursor: pointer; }
   .surah-heading { gap: 8px; }
   .display-toggle { padding: 0 5px; font-size: 8px; }
   .text-size-control input { width: 42px; }
-  .player-options select { max-width: 102px; }
+  .player-options select { max-width: 92px; }
+  .player-options #playback-mode-select { max-width: 82px; }
   .player-center { grid-template-columns: 122px 1fr; gap: 8px; }
 }
 
