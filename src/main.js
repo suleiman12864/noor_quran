@@ -1,4 +1,5 @@
 import './app.css'
+import { initWorshipTools, openWorshipShortcut, worshipToolsMarkup } from './worship-tools.js'
 
 const API = 'https://api.alquran.cloud/v1'
 const STORAGE = {
@@ -41,7 +42,11 @@ const state = {
   showTransliteration: true,
   fontSize: 34,
   reciter: localStorage.getItem(STORAGE.reciter) || reciters[0].id,
-  playbackMode: localStorage.getItem(STORAGE.playbackMode) === 'verse' ? 'verse' : 'surah',
+  playbackMode: ['verse', 'quran'].includes(localStorage.getItem(STORAGE.playbackMode))
+    ? localStorage.getItem(STORAGE.playbackMode)
+    : 'surah',
+  quranPlaylistActive: false,
+  surahQuery: '',
   bookmarks: new Set(readJSON(STORAGE.bookmarks, [])),
   loading: false,
   error: '',
@@ -102,6 +107,7 @@ function renderShell() {
         <span class="brand-name">noor<span>.</span></span>
       </a>
       <div class="topbar-center"><span class="live-dot"></span> A quiet place to read</div>
+      <button class="tools-nav" data-action="tools">Daily tools <span aria-hidden="true">✳</span></button>
       <button class="icon-button menu-toggle" data-action="mobile-nav" aria-label="Open chapter menu">${icon('menu')}</button>
       <a class="topbar-source" href="https://alquran.cloud" target="_blank" rel="noreferrer">Quran text & audio <span aria-hidden="true">↗</span></a>
     </header>
@@ -149,6 +155,14 @@ function renderShell() {
       </main>
     </div>
 
+    <div class="ayah-jump" id="ayah-jump">
+      <button class="ayah-jump-trigger" data-action="jump-open" aria-expanded="false">Go to ayah <span aria-hidden="true">↗</span></button>
+      <form class="ayah-jump-form" id="ayah-jump-form" hidden>
+        <label for="ayah-jump-number">Ayah number</label>
+        <div><input id="ayah-jump-number" type="number" min="1" value="1" /><button type="submit" aria-label="Go to ayah">Go</button></div>
+      </form>
+    </div>
+
     <footer class="audio-player" aria-label="Audio player">
       <div class="track-info" id="track-info"></div>
       <div class="player-center">
@@ -165,7 +179,7 @@ function renderShell() {
       </div>
       <div class="player-options">
         ${icon('volume')}
-        <select id="playback-mode-select" aria-label="Playback mode"><option value="surah">Full surah</option><option value="verse">Single verse</option></select>
+        <select id="playback-mode-select" aria-label="Playback mode"><option value="surah">Full surah</option><option value="quran">Full Quran</option><option value="verse">Single verse</option></select>
         <select id="reciter-select" aria-label="Choose reciter">${reciters.map((reciter) => `<option value="${reciter.id}">${escapeHtml(reciter.name)}</option>`).join('')}</select>
         <select id="speed-select" aria-label="Playback speed"><option value="1">1×</option><option value="0.75">0.75×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select>
       </div>
@@ -186,7 +200,7 @@ async function fetchSurahs() {
   document.querySelector('#chapter-total').textContent = `${state.surahs.length} chapters`
 }
 
-async function loadSurah(number, focusVerse = 1) {
+async function loadSurah(number, focusVerse = 1, autoplay = false) {
   const requestId = ++state.requestId
   state.page = 'reader'
   state.loading = true
@@ -223,8 +237,10 @@ async function loadSurah(number, focusVerse = 1) {
     renderReader()
     renderPlayer()
     closeMobileNav()
+    if (autoplay) playVerse(state.activeVerse)
   } catch (error) {
     if (requestId !== state.requestId) return
+    if (autoplay) state.quranPlaylistActive = false
     state.loading = false
     state.error = error.message || 'Something went wrong while loading this chapter.'
     renderReader()
@@ -270,12 +286,29 @@ function renderSidebar() {
 }
 
 function renderReader() {
+  document.body.classList.toggle('reader-open', state.page === 'reader')
+  document.body.classList.toggle('tools-open', state.page === 'tools')
+  document.body.classList.toggle('surahs-open', state.page === 'surahs')
+  document.querySelector('#ayah-jump-form').hidden = true
+  document.querySelector('.ayah-jump-trigger').setAttribute('aria-expanded', 'false')
+  if (state.page === 'tools') {
+    renderToolsPage()
+    return
+  }
+  document.querySelector('.reader-area').classList.remove('is-tools')
+  if (state.page === 'surahs') {
+    renderSurahDirectory()
+    return
+  }
+  document.querySelector('.reader-overline').hidden = state.page === 'reader'
+  document.querySelector('.reader-controls').hidden = false
+  document.querySelector('.reader-credit').hidden = state.page === 'reader'
   if (state.page === 'home') {
     renderHome()
     return
   }
 
-  document.querySelector('.reader-area').classList.remove('is-home')
+  document.querySelector('.reader-area').classList.remove('is-home', 'is-surahs')
   const surah = state.surahs.find((entry) => entry.number === state.selectedSurah)
   const heading = document.querySelector('#reader-heading')
   const list = document.querySelector('#ayah-list')
@@ -284,6 +317,7 @@ function renderReader() {
 
   heading.innerHTML = `
     <div class="surah-heading">
+      <button class="back-button reader-back-button" data-action="back-surahs" aria-label="Back to surah list">${icon('arrowLeft')}</button>
       <div class="surah-heading-copy"><span class="surah-number">CHAPTER ${String(surah.number).padStart(3, '0')}</span><h1>${escapeHtml(surah.englishName)}</h1><p>${escapeHtml(surah.englishNameTranslation)} <span>·</span> ${surah.revelationType} <span>·</span> ${surah.numberOfAyahs} verses</p></div>
       <div class="surah-name-arabic" lang="ar" dir="rtl">${escapeHtml(surah.name)}</div>
     </div>`
@@ -325,43 +359,84 @@ function renderHome() {
   const heading = document.querySelector('#reader-heading')
   const list = document.querySelector('#ayah-list')
   const message = document.querySelector('#reader-message')
-  const query = document.querySelector('#chapter-search').value.trim().toLocaleLowerCase()
+  area.classList.remove('is-tools', 'is-surahs')
   area.classList.add('is-home')
+  const progress = readJSON(STORAGE.progress, { surah: 1, ayah: 1 })
+  const resumeSurah = state.surahs.find((entry) => entry.number === Number(progress.surah))
+  const homeSurah = resumeSurah || state.surahs.find((entry) => entry.number === 1)
+  const resumeAyah = Math.max(1, Number(progress.ayah) || 1)
   heading.innerHTML = `
-    <section class="home-intro">
-      <div><span class="surah-number">NOOR QURAN READER</span><h1>Explore the Quran</h1><p>Choose a surah to read, follow along, or listen.</p></div>
-      <span class="home-calligraphy" lang="ar" dir="rtl" aria-hidden="true">اقرأ</span>
-    </section>`
-
-  if (state.libraryLoading) {
-    message.innerHTML = '<div class="reader-state"><span class="loader"></span><span>Loading surahs…</span></div>'
-    list.innerHTML = ''
-    return
-  }
-  if (state.error && !state.surahs.length) {
-    message.innerHTML = `<div class="reader-state error-state"><span>${escapeHtml(state.error)}</span><button class="retry-button" data-action="retry-all">Try again</button></div>`
-    list.innerHTML = ''
-    return
-  }
-
+    <section class="home-greeting">
+      <div class="home-greeting-brand"><span class="home-book-mark">${icon('book')}</span><span><small>WELCOME BACK</small><strong>myQuran</strong></span></div>
+      <span class="home-date">${new Intl.DateTimeFormat('en', { weekday: 'short', month: 'short', day: 'numeric' }).format(new Date())}</span>
+    </section>
+    <div class="home-welcome"><span class="welcome-calligraphy" lang="ar" dir="rtl">اقرأ</span><span class="welcome-caption">A LITTLE CLOSER, EVERY DAY</span></div>
+    <button class="home-last-read" data-action="resume-reading" data-surah="${homeSurah?.number || 1}" data-ayah="${resumeAyah}">
+      <span class="last-read-copy"><small>LAST READ</small><strong>${escapeHtml(homeSurah?.englishName || 'Al-Fatihah')}</strong><span>${escapeHtml(homeSurah?.englishNameTranslation || 'The Opening')} · Verse ${resumeAyah}</span></span>
+      <span class="last-read-arrow">${icon('arrowRight')}</span>
+      <span class="last-read-decoration" aria-hidden="true">۞</span>
+    </button>`
   message.innerHTML = ''
-  const progress = readJSON(STORAGE.progress, null)
-  const resumeSurah = progress && state.surahs.find((entry) => entry.number === Number(progress.surah))
-  const filteredSurahs = state.surahs.filter((surah) => `${surah.number} ${surah.englishName} ${surah.englishNameTranslation} ${surah.name}`.toLocaleLowerCase().includes(query))
-  const resumeCard = resumeSurah ? `
-    <button class="resume-card" data-action="resume-reading" data-surah="${resumeSurah.number}" data-ayah="${Number(progress.ayah) || 1}">
-      <span class="resume-label">PICK UP WHERE YOU LEFT OFF</span>
-      <span class="resume-main"><span><strong>${escapeHtml(resumeSurah.englishName)}</strong><small>${escapeHtml(resumeSurah.englishNameTranslation)} · Verse ${Number(progress.ayah) || 1}</small></span><span class="resume-arrow">${icon('arrowRight')}</span></span>
-    </button>` : ''
   list.innerHTML = `
-    ${resumeCard}
-    <div class="home-list-heading"><h2>All surahs</h2><span>${filteredSurahs.length} of 114</span></div>
-    <div class="surah-grid">${filteredSurahs.map((surah) => `
-      <button class="surah-card" data-action="select-surah" data-surah="${surah.number}">
-        <span class="surah-card-number">${String(surah.number).padStart(3, '0')}</span>
-        <span class="surah-card-copy"><strong>${escapeHtml(surah.englishName)}</strong><small>${escapeHtml(surah.englishNameTranslation)} · ${surah.numberOfAyahs} verses</small></span>
-        <span class="surah-card-arabic" lang="ar" dir="rtl">${escapeHtml(surah.name.replace(/^سُورَةُ\s*/, ''))}</span>
-      </button>`).join('') || '<p class="no-results home-no-results">No surahs match that search.</p>'}</div>`
+    <section class="home-feature-section">
+      <div class="home-section-heading"><span>YOUR DAILY PRACTICE</span><small>7 ways to begin</small></div>
+      <div class="home-feature-grid">
+        <button class="home-feature-tile tile-quran" data-action="browse-surahs"><span class="feature-symbol">${icon('book')}</span><strong>Read Quran</strong><small>114 surahs</small></button>
+        <button class="home-feature-tile tile-names" data-action="tools" data-tools-target="names"><span class="feature-symbol">﷽</span><strong>99 Names</strong><small>Asma ul Husna</small></button>
+        <button class="home-feature-tile tile-prayer" data-action="tools" data-tools-target="prayer"><span class="feature-symbol">◷</span><strong>Prayer times</strong><small>Daily schedule</small></button>
+        <button class="home-feature-tile tile-qibla" data-action="tools" data-tools-target="qibla"><span class="feature-symbol">⌖</span><strong>Qibla compass</strong><small>Find direction</small></button>
+        <button class="home-feature-tile tile-daily" data-action="tools" data-tools-target="daily"><span class="feature-symbol">۞</span><strong>Ayah of the day</strong><small>A moment to reflect</small></button>
+        <button class="home-feature-tile tile-adhan" data-action="tools" data-tools-target="adhan"><span class="feature-symbol">♫</span><strong>Adhan alert</strong><small>Prayer reminder</small></button>
+        <button class="home-feature-tile tile-tasbeeh" data-action="tools" data-tools-target="tasbeeh"><span class="feature-symbol">◉</span><strong>Tasbeeh</strong><small>Keep your count</small></button>
+      </div>
+    </section>`
+  initWorshipTools((surah, ayah) => loadSurah(surah, ayah))
+}
+
+function renderSurahDirectory() {
+  const area = document.querySelector('.reader-area')
+  const heading = document.querySelector('#reader-heading')
+  const message = document.querySelector('#reader-message')
+  const list = document.querySelector('#ayah-list')
+  area.classList.remove('is-home', 'is-tools')
+  area.classList.add('is-surahs')
+  document.querySelector('.reader-overline').hidden = true
+  document.querySelector('.reader-controls').hidden = true
+  document.querySelector('.reader-credit').hidden = true
+  const query = state.surahQuery.trim().toLocaleLowerCase()
+  const surahs = state.surahs.filter((surah) => `${surah.number} ${surah.englishName} ${surah.englishNameTranslation} ${surah.name}`.toLocaleLowerCase().includes(query))
+  heading.innerHTML = `
+    <section class="surah-browser-heading">
+      <button class="back-button" data-action="home" aria-label="Back to home">${icon('arrowLeft')}</button>
+      <div><small>MY QURAN</small><strong>Read Quran</strong></div>
+      <span class="browser-count">${state.surahs.length || 114} surahs</span>
+    </section>
+    <label class="surah-search">${icon('search')}<input id="surah-search" type="search" value="${escapeHtml(state.surahQuery)}" placeholder="Search surahs" autocomplete="off" aria-label="Search surahs" /></label>
+    <div class="surah-list-heading"><h1>Surah</h1><span>سورة</span></div>`
+  message.innerHTML = state.libraryLoading
+    ? '<div class="reader-state"><span class="loader"></span><span>Loading surahs…</span></div>'
+    : state.error && !state.surahs.length
+      ? `<div class="reader-state error-state"><span>${escapeHtml(state.error)}</span><button class="retry-button" data-action="retry-all">Try again</button></div>`
+      : ''
+  list.innerHTML = state.libraryLoading || (state.error && !state.surahs.length) ? '' : surahs.length ? `<div class="surah-directory-list">${surahs.map((surah) => `
+    <button class="surah-directory-row" data-action="select-surah" data-surah="${surah.number}">
+      <span class="directory-index"><span>${String(surah.number).padStart(2, '0')}</span></span>
+      <span class="directory-copy"><strong>${escapeHtml(surah.englishName)}</strong><small>${escapeHtml(surah.englishNameTranslation)} · ${surah.numberOfAyahs} verses</small></span>
+      <span class="directory-arabic" lang="ar" dir="rtl">${escapeHtml(surah.name.replace(/^سُورَةُ\s*/, ''))}</span>
+    </button>`).join('')}</div>` : '<p class="directory-empty">No surahs match that search.</p>'
+}
+
+function renderToolsPage() {
+  const area = document.querySelector('.reader-area')
+  area.classList.remove('is-home', 'is-surahs')
+  area.classList.add('is-tools')
+  document.querySelector('#reader-heading').innerHTML = ''
+  document.querySelector('#reader-message').innerHTML = ''
+  document.querySelector('#ayah-list').innerHTML = worshipToolsMarkup()
+  document.querySelector('.reader-overline').hidden = true
+  document.querySelector('.reader-controls').hidden = true
+  document.querySelector('.reader-credit').hidden = true
+  initWorshipTools((surah, ayah) => loadSurah(surah, ayah))
 }
 
 function renderPlayer() {
@@ -408,6 +483,7 @@ function updateActiveVerse(verseNumber, scroll = true) {
 async function playVerse(verseNumber = state.activeVerse) {
   const verse = state.verses.find((entry) => entry.number === verseNumber)
   if (!verse?.audio) return
+  if (state.playbackMode === 'quran') state.quranPlaylistActive = true
   if (state.activeVerse !== verseNumber) updateActiveVerse(verseNumber, false)
   audio.src = verse.audio
   try {
@@ -418,6 +494,15 @@ async function playVerse(verseNumber = state.activeVerse) {
   renderPlayer()
   renderReader()
   document.querySelector(`#ayah-${verseNumber}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
+
+function startPlayback() {
+  if (state.playbackMode === 'quran' && !state.quranPlaylistActive) {
+    state.quranPlaylistActive = true
+    loadSurah(1, 1, true)
+    return
+  }
+  playVerse(state.activeVerse)
 }
 
 function toggleBookmark(globalNumber) {
@@ -463,6 +548,25 @@ document.addEventListener('click', (event) => {
     renderReader()
     renderPlayer()
   }
+  if (action === 'tools') {
+    state.page = 'tools'
+    closeMobileNav()
+    renderReader()
+    renderPlayer()
+    openWorshipShortcut(button.dataset.toolsTarget)
+  }
+  if (action === 'browse-surahs') {
+    state.page = 'surahs'
+    state.surahQuery = ''
+    closeMobileNav()
+    renderReader()
+    renderPlayer()
+  }
+  if (action === 'back-surahs') {
+    state.page = 'surahs'
+    renderReader()
+    renderPlayer()
+  }
   if (action === 'resume-reading') loadSurah(Number(button.dataset.surah), Number(button.dataset.ayah))
   if (action === 'select-surah') loadSurah(Number(button.dataset.surah))
   if (action === 'open-bookmark') {
@@ -491,16 +595,45 @@ document.addEventListener('click', (event) => {
   }
   if (action === 'close-mobile-nav') closeMobileNav()
   if (action === 'toggle-play') {
-    if (audio.paused) playVerse(state.activeVerse)
+    if (audio.paused) startPlayback()
     else audio.pause()
   }
   if (action === 'previous-ayah') playVerse(Math.max(1, state.activeVerse - 1))
   if (action === 'next-ayah') playVerse(Math.min(state.verses.length, state.activeVerse + 1))
+  if (action === 'jump-open') {
+    const form = document.querySelector('#ayah-jump-form')
+    form.hidden = !form.hidden
+    button.setAttribute('aria-expanded', String(!form.hidden))
+    if (!form.hidden) {
+      const input = document.querySelector('#ayah-jump-number')
+      input.max = state.verses.length || 1
+      input.value = state.activeVerse
+      input.focus()
+    }
+  }
+})
+
+document.querySelector('#ayah-jump-form').addEventListener('submit', (event) => {
+  event.preventDefault()
+  const verseNumber = Number(document.querySelector('#ayah-jump-number').value)
+  if (!Number.isInteger(verseNumber) || verseNumber < 1 || verseNumber > state.verses.length) return
+  updateActiveVerse(verseNumber)
+  document.querySelector('#ayah-jump-form').hidden = true
+  document.querySelector('.ayah-jump-trigger').setAttribute('aria-expanded', 'false')
 })
 
 document.querySelector('#chapter-search').addEventListener('input', () => {
   renderSidebar()
   if (state.page === 'home') renderHome()
+})
+document.addEventListener('input', (event) => {
+  if (event.target.id !== 'surah-search') return
+  state.surahQuery = event.target.value
+  const position = event.target.selectionStart
+  renderSurahDirectory()
+  const search = document.querySelector('#surah-search')
+  search.focus()
+  search.setSelectionRange(position, position)
 })
 document.querySelector('#text-size').addEventListener('input', (event) => {
   state.fontSize = Number(event.target.value)
@@ -515,7 +648,12 @@ document.querySelector('#speed-select').addEventListener('change', (event) => {
   audio.playbackRate = Number(event.target.value)
 })
 document.querySelector('#playback-mode-select').addEventListener('change', (event) => {
-  state.playbackMode = event.target.value === 'verse' ? 'verse' : 'surah'
+  const nextMode = ['verse', 'quran'].includes(event.target.value) ? event.target.value : 'surah'
+  if (state.playbackMode !== nextMode) {
+    if (nextMode === 'quran') audio.pause()
+    state.quranPlaylistActive = false
+    state.playbackMode = nextMode
+  }
   localStorage.setItem(STORAGE.playbackMode, state.playbackMode)
 })
 document.querySelector('#audio-progress').addEventListener('input', (event) => {
@@ -548,8 +686,13 @@ audio.addEventListener('timeupdate', () => {
   if (durationTime) durationTime.textContent = formatTime(audio.duration)
 })
 audio.addEventListener('ended', () => {
-  if (state.playbackMode === 'surah' && state.activeVerse < state.verses.length) playVerse(state.activeVerse + 1)
+  if (state.playbackMode === 'quran' && state.activeVerse >= state.verses.length && state.selectedSurah < 114) {
+    loadSurah(state.selectedSurah + 1, 1, true)
+  } else if (['surah', 'quran'].includes(state.playbackMode) && state.activeVerse < state.verses.length) {
+    playVerse(state.activeVerse + 1)
+  }
   else {
+    if (state.playbackMode === 'quran') state.quranPlaylistActive = false
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none'
     updateActiveVerse(state.activeVerse, false)
     renderReader()
@@ -562,7 +705,7 @@ audio.addEventListener('error', () => {
 
 if ('mediaSession' in navigator) {
   const mediaActions = {
-    play: () => playVerse(state.activeVerse),
+    play: startPlayback,
     pause: () => audio.pause(),
     previoustrack: () => playVerse(Math.max(1, state.activeVerse - 1)),
     nexttrack: () => playVerse(Math.min(state.verses.length, state.activeVerse + 1)),
