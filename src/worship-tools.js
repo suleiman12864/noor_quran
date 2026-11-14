@@ -6,6 +6,8 @@ const ADHAN_AUDIO_URL = 'https://www.islamcan.com/audio/adhan/azan1.mp3'
 const LOCATION_KEY = 'noor-location'
 const METHOD_KEY = 'noor-prayer-method'
 const TASBEEH_KEY = 'noor-tasbeeh-count'
+const PLAN_DAYS_KEY = 'noor-reading-plan-days'
+const PLAN_PROGRESS_KEY = 'noor-reading-plan-progress'
 const PRAYERS = [
   ['Fajr', 'Fajr'],
   ['Dhuhr', 'Dhuhr'],
@@ -29,6 +31,23 @@ function readJSON(key, fallback) {
   }
 }
 
+async function fetchQuranData(url) {
+  const cacheKey = `noor-quran-data:${url}`
+  try {
+    const response = await fetch(url)
+    if (!response.ok) throw new Error('The Quran text service is unavailable.')
+    const result = await response.json()
+    try {
+      localStorage.setItem(cacheKey, JSON.stringify(result))
+    } catch {}
+    return result
+  } catch (error) {
+    const cached = readJSON(cacheKey, null)
+    if (cached) return cached
+    throw error
+  }
+}
+
 function escapeHTML(value = '') {
   return String(value).replace(/[&<>"']/g, (character) => ({
     '&': '&amp;',
@@ -44,6 +63,12 @@ let prayerData = null
 let prayerError = ''
 let prayerMethod = Number(localStorage.getItem(METHOD_KEY)) || 3
 let tasbeehCount = Number(localStorage.getItem(TASBEEH_KEY)) || 0
+let readingPlanDays = [30, 60, 90].includes(Number(localStorage.getItem(PLAN_DAYS_KEY)))
+  ? Number(localStorage.getItem(PLAN_DAYS_KEY))
+  : 30
+let readingPlanProgress = readJSON(PLAN_PROGRESS_KEY, { date: '', verses: [] })
+if (!Array.isArray(readingPlanProgress.verses)) readingPlanProgress = { date: '', verses: [] }
+let hijriMonthOffset = 0
 let adhanEnabled = localStorage.getItem('noor-adhan-enabled') === 'true'
 let adhanTimer
 let clockTimer
@@ -147,11 +172,15 @@ export function homeWorshipMarkup() {
 export function worshipToolsMarkup() {
   return `
     <section class="tools-page">
-      <div class="tools-page-heading"><div><span class="surah-number">A QUIETER RHYTHM</span><h1>Daily tools</h1><p>Prayer, remembrance, and reflection in one place.</p></div><span class="tools-heading-ornament" aria-hidden="true">۞</span></div>
+      <div class="tools-page-heading"><div class="tools-heading-copy"><button class="back-button" data-action="home" aria-label="Back to home">‹</button><div><span class="surah-number">A QUIETER RHYTHM</span><h1>Daily tools</h1><p>Prayer, remembrance, and reflection in one place.</p></div></div><span class="tools-heading-ornament" aria-hidden="true">۞</span></div>
       <div class="tools-feature-grid">
         ${prayerWidgetMarkup()}
         ${qiblaWidgetMarkup()}
         ${tasbeehWidgetMarkup()}
+      </div>
+      <div class="study-tools-grid">
+        ${readingPlanMarkup()}
+        ${hijriCalendarMarkup()}
       </div>
       <section class="names-section" id="names-section">
         <div class="section-heading"><div><span class="surah-number">ASMA UL HUSNA</span><h2>The 99 Names of Allah</h2></div><span class="names-total">99 names</span></div>
@@ -227,12 +256,22 @@ function updateQiblaUI() {
   const bearingLabel = document.querySelector('#qibla-bearing')
   const note = document.querySelector('#qibla-note')
   const needle = document.querySelector('#qibla-needle')
+  const widget = document.querySelector('.qibla-widget')
+  const compass = document.querySelector('#qibla-compass')
   if (!bearingLabel || !coordinates) return
+  const headingError = compassHeading === null
+    ? Infinity
+    : Math.abs(((currentQiblaBearing - compassHeading + 540) % 360) - 180)
+  const aligned = headingError <= 5
+  widget?.classList.toggle('is-aligned', aligned)
+  compass?.setAttribute('aria-label', aligned ? 'Qibla direction aligned' : 'Qibla compass')
   bearingLabel.textContent = `${Math.round(currentQiblaBearing)}° from north`
   if (needle) needle.style.transform = `rotate(${currentQiblaBearing - (compassHeading || 0)}deg)`
-  if (note) note.textContent = compassHeading === null
-    ? 'Activate live compass to orient your phone'
-    : 'Turn until the needle points to the Kaaba'
+  if (note) note.textContent = aligned
+    ? 'You are facing the Qibla'
+    : compassHeading === null
+      ? 'Activate live compass to orient your phone'
+      : 'Turn until the needle points to the Kaaba'
 }
 
 function renderPrayerData() {
@@ -396,6 +435,90 @@ function renderTasbeeh() {
   if (cycle) cycle.textContent = Math.floor(tasbeehCount / 33) + 1
 }
 
+function renderReadingPlan() {
+  const progress = document.querySelector('#reading-plan-progress')
+  const count = document.querySelector('.reading-plan-count span')
+  const percent = document.querySelector('#reading-plan-percent')
+  if (!progress || !count || !percent) return
+  const target = Math.ceil(6236 / readingPlanDays)
+  const today = new Date().toLocaleDateString('en-CA')
+  const readToday = readingPlanProgress.date === today && Array.isArray(readingPlanProgress.verses)
+    ? readingPlanProgress.verses.length
+    : 0
+  progress.max = target
+  progress.value = Math.min(readToday, target)
+  count.textContent = `${Math.min(readToday, target)} of ${target} ayahs today`
+  percent.textContent = `${Math.min(100, Math.round(readToday / target * 100))}%`
+}
+
+function hijriParts(date) {
+  const formatter = new Intl.DateTimeFormat('en-u-ca-islamic-umalqura-nu-latn', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  })
+  return Object.fromEntries(formatter.formatToParts(date).map(({ type, value }) => [type, value]))
+}
+
+function hijriMonthKey(date) {
+  const parts = hijriParts(date)
+  return `${parts.year}-${parts.month}`
+}
+
+function firstDayOfHijriMonth(date) {
+  const firstDay = new Date(date)
+  firstDay.setHours(12, 0, 0, 0)
+  const key = hijriMonthKey(firstDay)
+  for (let day = 0; day < 31; day += 1) {
+    const previous = new Date(firstDay)
+    previous.setDate(previous.getDate() - 1)
+    if (hijriMonthKey(previous) !== key) break
+    firstDay.setDate(firstDay.getDate() - 1)
+  }
+  return firstDay
+}
+
+function renderHijriCalendar() {
+  const monthLabel = document.querySelector('#hijri-month-label')
+  const grid = document.querySelector('#hijri-calendar-grid')
+  if (!monthLabel || !grid) return
+  const today = new Date()
+  let monthStart = firstDayOfHijriMonth(today)
+  for (let step = 0; step < Math.abs(hijriMonthOffset); step += 1) {
+    const anchor = new Date(monthStart)
+    anchor.setDate(anchor.getDate() + (hijriMonthOffset > 0 ? 31 : -1))
+    monthStart = firstDayOfHijriMonth(anchor)
+  }
+  const key = hijriMonthKey(monthStart)
+  monthLabel.textContent = new Intl.DateTimeFormat('en-u-ca-islamic-umalqura-nu-latn', {
+    month: 'long',
+    year: 'numeric',
+  }).format(monthStart)
+  const days = []
+  const date = new Date(monthStart)
+  while (hijriMonthKey(date) === key && days.length < 31) {
+    const parts = hijriParts(date)
+    const current = date.toDateString() === today.toDateString()
+    days.push(`<span class="hijri-day ${current ? 'is-today' : ''}" role="gridcell" aria-label="${parts.month} ${parts.day}, ${parts.year}">${parts.day}</span>`)
+    date.setDate(date.getDate() + 1)
+  }
+  grid.innerHTML = `${'<span class="hijri-day is-empty" aria-hidden="true"></span>'.repeat(monthStart.getDay())}${days.join('')}`
+}
+
+export function recordReadingVerse(globalVerseNumber) {
+  const today = new Date().toLocaleDateString('en-CA')
+  if (readingPlanProgress.date !== today || !Array.isArray(readingPlanProgress.verses)) {
+    readingPlanProgress = { date: today, verses: [] }
+  }
+  const verseNumber = Number(globalVerseNumber)
+  if (!Number.isInteger(verseNumber) || verseNumber < 1 || verseNumber > 6236) return
+  if (!readingPlanProgress.verses.includes(verseNumber)) {
+    readingPlanProgress.verses.push(verseNumber)
+    localStorage.setItem(PLAN_PROGRESS_KEY, JSON.stringify(readingPlanProgress))
+  }
+  renderReadingPlan()
+}
+
 function renderNames(query = '') {
   const normalized = query.trim().toLocaleLowerCase()
   document.querySelectorAll('.name-item').forEach((item) => {
@@ -410,11 +533,7 @@ async function renderDailyVerse() {
     const now = new Date()
     const dayOfYear = Math.floor((now - new Date(now.getFullYear(), 0, 0)) / 86400000)
     const globalVerse = ((dayOfYear * 71 + 17) % 6236) + 1
-    dailyVersePromise = fetch(`${QURAN_API}/ayah/${globalVerse}/editions/quran-uthmani,en.sahih`)
-      .then((response) => {
-        if (!response.ok) throw new Error('Daily verse could not be loaded.')
-        return response.json()
-      })
+    dailyVersePromise = fetchQuranData(`${QURAN_API}/ayah/${globalVerse}/editions/quran-uthmani,en.sahih`)
       .then((result) => {
         if (result.code !== 200 || result.data?.length < 2) throw new Error('Daily verse is unavailable.')
         const [arabic, translation] = result.data
@@ -443,6 +562,8 @@ function scrollToTool(target) {
     tasbeeh: '.tasbeeh-widget',
     names: '#names-section',
     daily: '#tools-daily-verse',
+    calendar: '#hijri-calendar',
+    plan: '.reading-plan-widget',
   }
   document.querySelector(ids[target] || '#names-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
@@ -469,6 +590,14 @@ export function initWorshipTools(onOpenAyah) {
         localStorage.setItem(TASBEEH_KEY, '0')
         renderTasbeeh()
       }
+      if (action === 'hijri-previous') {
+        hijriMonthOffset -= 1
+        renderHijriCalendar()
+      }
+      if (action === 'hijri-next') {
+        hijriMonthOffset += 1
+        renderHijriCalendar()
+      }
       if (action === 'read-ayah') onOpenAyah(Number(button.dataset.surah), Number(button.dataset.ayah))
     })
     document.addEventListener('change', (event) => {
@@ -476,6 +605,11 @@ export function initWorshipTools(onOpenAyah) {
         prayerMethod = Number(event.target.value)
         localStorage.setItem(METHOD_KEY, String(prayerMethod))
         fetchPrayerTimes()
+      }
+      if (event.target.id === 'reading-plan-days') {
+        readingPlanDays = Number(event.target.value)
+        localStorage.setItem(PLAN_DAYS_KEY, String(readingPlanDays))
+        renderReadingPlan()
       }
     })
     document.addEventListener('input', (event) => {
@@ -495,9 +629,35 @@ export function initWorshipTools(onOpenAyah) {
   }
   renderPrayerData()
   renderTasbeeh()
+  renderReadingPlan()
+  renderHijriCalendar()
   renderDailyVerse()
 }
 
 export function openWorshipShortcut(target) {
   if (target) scrollToTool(target)
+}
+
+function readingPlanMarkup() {
+  const target = Math.ceil(6236 / readingPlanDays)
+  const today = new Date().toLocaleDateString('en-CA')
+  const readToday = readingPlanProgress.date === today ? readingPlanProgress.verses.length : 0
+  return `
+    <section class="reading-plan-widget" aria-label="Quran reading plan">
+      <div class="widget-kicker"><span class="widget-symbol">◷</span> READING PLAN</div>
+      <div class="reading-plan-heading"><strong>Complete the Quran</strong><label>Finish in <select id="reading-plan-days" aria-label="Choose plan duration"><option value="30" ${readingPlanDays === 30 ? 'selected' : ''}>30 days</option><option value="60" ${readingPlanDays === 60 ? 'selected' : ''}>60 days</option><option value="90" ${readingPlanDays === 90 ? 'selected' : ''}>90 days</option></select></label></div>
+      <p class="reading-plan-target">Read about <strong>${target}</strong> ayahs each day</p>
+      <progress id="reading-plan-progress" max="${target}" value="${Math.min(readToday, target)}"></progress>
+      <div class="reading-plan-count"><span>${Math.min(readToday, target)} of ${target} ayahs today</span><strong id="reading-plan-percent">${Math.min(100, Math.round(readToday / target * 100))}%</strong></div>
+    </section>`
+}
+
+function hijriCalendarMarkup() {
+  return `
+    <section class="hijri-widget" id="hijri-calendar" aria-label="Hijri calendar">
+      <div class="widget-kicker"><span class="widget-symbol">☾</span> HIJRI CALENDAR</div>
+      <div class="hijri-calendar-heading"><button data-worship-action="hijri-previous" aria-label="Previous Hijri month">‹</button><strong id="hijri-month-label"></strong><button data-worship-action="hijri-next" aria-label="Next Hijri month">›</button></div>
+      <div class="hijri-weekdays" aria-hidden="true"><span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span></div>
+      <div class="hijri-calendar-grid" id="hijri-calendar-grid" role="grid" aria-label="Hijri month dates"></div>
+    </section>`
 }

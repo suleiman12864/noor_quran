@@ -1,5 +1,5 @@
 import './app.css'
-import { initWorshipTools, openWorshipShortcut, worshipToolsMarkup } from './worship-tools.js'
+import { initWorshipTools, openWorshipShortcut, recordReadingVerse, worshipToolsMarkup } from './worship-tools.js'
 
 const API = 'https://api.alquran.cloud/v1'
 const STORAGE = {
@@ -7,12 +7,26 @@ const STORAGE = {
   progress: 'noor-progress',
   reciter: 'noor-reciter',
   playbackMode: 'noor-playback-mode',
+  translation: 'noor-translation',
+  repeat: 'noor-repeat',
+  notes: 'noor-ayah-notes',
 }
 const reciters = [
   { id: 'ar.alafasy', name: 'Mishary Alafasy' },
   { id: 'ar.husary', name: 'Mahmoud Al-Husary' },
   { id: 'ar.abdurrahmaansudais', name: 'Abdurrahman Al-Sudais' },
   { id: 'ar.mahermuaiqly', name: 'Maher Al-Muaiqly' },
+]
+const translations = [
+  { id: 'en.sahih', name: 'Saheeh International' },
+  { id: 'en.pickthall', name: 'Pickthall' },
+  { id: 'en.yusufali', name: 'Yusuf Ali' },
+  { id: 'en.asad', name: 'Muhammad Asad' },
+  { id: 'en.itani', name: 'Clear Quran' },
+]
+const tafsirEditions = [
+  { id: 'ar.muyassar', name: 'Tafsir al-Muyassar' },
+  { id: 'ar.jalalayn', name: 'Tafsir al-Jalalayn' },
 ]
 const initialProgress = readJSON(STORAGE.progress, { surah: 1, ayah: 1 })
 const icons = {
@@ -42,10 +56,30 @@ const state = {
   showTransliteration: true,
   fontSize: 34,
   reciter: localStorage.getItem(STORAGE.reciter) || reciters[0].id,
+  translation: translations.some((item) => item.id === localStorage.getItem(STORAGE.translation))
+    ? localStorage.getItem(STORAGE.translation)
+    : translations[0].id,
+  tafsirEdition: 'ar.muyassar',
+  tafsirByVerse: {},
+  tafsirLoadedFor: '',
+  tafsirLoading: false,
+  tafsirError: '',
+  expandedTafsir: new Set(),
+  notes: readJSON(STORAGE.notes, {}),
+  openNotes: new Set(),
+  searchQuery: '',
+  searchResults: [],
+  searchStatus: '',
+  searchRequestId: 0,
+  searchTimer: 0,
   playbackMode: ['verse', 'quran'].includes(localStorage.getItem(STORAGE.playbackMode))
     ? localStorage.getItem(STORAGE.playbackMode)
     : 'surah',
   quranPlaylistActive: false,
+  repeatMode: ['verse', '3', '5'].includes(localStorage.getItem(STORAGE.repeat))
+    ? localStorage.getItem(STORAGE.repeat)
+    : 'off',
+  repeatCount: 0,
   surahQuery: '',
   bookmarks: new Set(readJSON(STORAGE.bookmarks, [])),
   loading: false,
@@ -63,6 +97,23 @@ function readJSON(key, fallback) {
     return JSON.parse(localStorage.getItem(key)) ?? fallback
   } catch {
     return fallback
+  }
+}
+
+async function fetchQuranData(url) {
+  const cacheKey = `noor-quran-data:${url}`
+  try {
+    const response = await fetch(url)
+    if (!response.ok) throw new Error('The Quran text service is unavailable.')
+    const result = await response.json()
+    try {
+      localStorage.setItem(cacheKey, JSON.stringify(result))
+    } catch {}
+    return result
+  } catch (error) {
+    const cached = readJSON(cacheKey, null)
+    if (cached) return cached
+    throw error
   }
 }
 
@@ -148,6 +199,10 @@ function renderShell() {
             </div>
             <label class="text-size-control" for="text-size"><span>Aa</span><input id="text-size" type="range" min="28" max="48" value="34" aria-label="Arabic text size" /><span class="large-aa">Aa</span></label>
           </section>
+          <section class="reader-study-bar" aria-label="Translation and commentary">
+            <label>Translation<select id="translation-select" aria-label="Choose translation">${translations.map((item) => `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join('')}</select></label>
+            <label>Tafsir<select id="tafsir-select" aria-label="Choose tafsir">${tafsirEditions.map((item) => `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join('')}</select></label>
+          </section>
           <div id="reader-message" aria-live="polite"></div>
           <div id="ayah-list" class="ayah-list" aria-live="polite"></div>
           <div class="reader-credit">Translation: Saheeh International <span>·</span> Transliteration provided for reading support</div>
@@ -180,6 +235,7 @@ function renderShell() {
       <div class="player-options">
         ${icon('volume')}
         <select id="playback-mode-select" aria-label="Playback mode"><option value="surah">Full surah</option><option value="quran">Full Quran</option><option value="verse">Single verse</option></select>
+        <select id="repeat-mode-select" aria-label="Repeat playback"><option value="off">Repeat off</option><option value="verse">Repeat ayah</option><option value="3">3 times</option><option value="5">5 times</option></select>
         <select id="reciter-select" aria-label="Choose reciter">${reciters.map((reciter) => `<option value="${reciter.id}">${escapeHtml(reciter.name)}</option>`).join('')}</select>
         <select id="speed-select" aria-label="Playback speed"><option value="1">1×</option><option value="0.75">0.75×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select>
       </div>
@@ -188,13 +244,14 @@ function renderShell() {
   `
   document.querySelector('#reciter-select').value = state.reciter
   document.querySelector('#playback-mode-select').value = state.playbackMode
+  document.querySelector('#repeat-mode-select').value = state.repeatMode
+  document.querySelector('#translation-select').value = state.translation
+  document.querySelector('#tafsir-select').value = state.tafsirEdition
   document.querySelector('#text-size').value = state.fontSize
 }
 
 async function fetchSurahs() {
-  const response = await fetch(`${API}/surah`)
-  if (!response.ok) throw new Error('Could not reach the Quran text service.')
-  const result = await response.json()
+  const result = await fetchQuranData(`${API}/surah`)
   if (result.code !== 200 || !Array.isArray(result.data)) throw new Error('Chapter information could not be loaded.')
   state.surahs = result.data
   document.querySelector('#chapter-total').textContent = `${state.surahs.length} chapters`
@@ -206,16 +263,18 @@ async function loadSurah(number, focusVerse = 1, autoplay = false) {
   state.loading = true
   state.error = ''
   state.selectedSurah = number
+  state.expandedTafsir.clear()
+  state.tafsirByVerse = {}
+  state.tafsirLoadedFor = ''
+  state.tafsirError = ''
   audio.pause()
   renderSidebar()
   renderReader()
   renderPlayer()
 
   try {
-    const editions = `quran-uthmani,en.sahih,en.transliteration,${state.reciter}`
-    const response = await fetch(`${API}/surah/${number}/editions/${editions}`)
-    if (!response.ok) throw new Error('The chapter could not be loaded. Check your connection and try again.')
-    const result = await response.json()
+    const editions = `quran-uthmani,${state.translation},en.transliteration,${state.reciter}`
+    const result = await fetchQuranData(`${API}/surah/${number}/editions/${editions}`)
     if (requestId !== state.requestId) return
     if (result.code !== 200 || result.data?.length < 4) throw new Error('The requested Quran editions are unavailable right now.')
 
@@ -233,6 +292,7 @@ async function loadSurah(number, focusVerse = 1, autoplay = false) {
     state.loading = false
     state.error = ''
     saveProgress(number, state.activeVerse)
+    recordReadingVerse(state.verses[state.activeVerse - 1]?.globalNumber)
     renderSidebar()
     renderReader()
     renderPlayer()
@@ -289,13 +349,18 @@ function renderReader() {
   document.body.classList.toggle('reader-open', state.page === 'reader')
   document.body.classList.toggle('tools-open', state.page === 'tools')
   document.body.classList.toggle('surahs-open', state.page === 'surahs')
+  document.body.classList.toggle('search-open', state.page === 'search')
   document.querySelector('#ayah-jump-form').hidden = true
   document.querySelector('.ayah-jump-trigger').setAttribute('aria-expanded', 'false')
   if (state.page === 'tools') {
     renderToolsPage()
     return
   }
-  document.querySelector('.reader-area').classList.remove('is-tools')
+  if (state.page === 'search') {
+    renderSearchPage()
+    return
+  }
+  document.querySelector('.reader-area').classList.remove('is-tools', 'is-search')
   if (state.page === 'surahs') {
     renderSurahDirectory()
     return
@@ -344,6 +409,9 @@ function renderReader() {
       <p class="ayah-arabic" lang="ar" dir="rtl">${escapeHtml(verse.arabic)}</p>
       ${state.showTransliteration ? `<p class="ayah-transliteration" lang="en">${escapeHtml(verse.transliteration)}</p>` : ''}
       ${state.showTranslation ? `<p class="ayah-translation" lang="en">${escapeHtml(verse.translation)}</p>` : ''}
+      <div class="ayah-study-actions"><button class="ayah-study-action" data-action="toggle-tafsir" data-ayah="${verse.number}" aria-expanded="${state.expandedTafsir.has(verse.number)}">${state.expandedTafsir.has(verse.number) ? 'Hide tafsir' : 'Tafsir'}</button><button class="ayah-study-action ${state.notes[verse.globalNumber] ? 'has-note' : ''}" data-action="toggle-note" data-global-number="${verse.globalNumber}" aria-expanded="${state.openNotes.has(verse.globalNumber)}">${state.notes[verse.globalNumber] ? 'Edit note' : 'Add note'}</button></div>
+      ${state.expandedTafsir.has(verse.number) ? `<div class="tafsir-panel" lang="ar" dir="rtl">${state.tafsirLoading ? 'Loading tafsir…' : state.tafsirError ? escapeHtml(state.tafsirError) : escapeHtml(state.tafsirByVerse[verse.number] || 'Commentary is unavailable for this ayah.')}</div>` : ''}
+      ${state.openNotes.has(verse.globalNumber) ? `<form class="ayah-note-form" data-note-form="${verse.globalNumber}"><label for="note-${verse.globalNumber}">Private study note</label><textarea id="note-${verse.globalNumber}" maxlength="1000" placeholder="Write a note for yourself…">${escapeHtml(state.notes[verse.globalNumber] || '')}</textarea><div><button type="button" class="ayah-study-action" data-action="toggle-note" data-global-number="${verse.globalNumber}">Cancel</button><button type="submit" class="note-save-button">Save note</button></div></form>` : ''}
     </article>`
   }).join('')}`
   list.style.setProperty('--arabic-size', `${state.fontSize}px`)
@@ -359,7 +427,7 @@ function renderHome() {
   const heading = document.querySelector('#reader-heading')
   const list = document.querySelector('#ayah-list')
   const message = document.querySelector('#reader-message')
-  area.classList.remove('is-tools', 'is-surahs')
+  area.classList.remove('is-tools', 'is-surahs', 'is-search')
   area.classList.add('is-home')
   const progress = readJSON(STORAGE.progress, { surah: 1, ayah: 1 })
   const resumeSurah = state.surahs.find((entry) => entry.number === Number(progress.surah))
@@ -368,7 +436,7 @@ function renderHome() {
   heading.innerHTML = `
     <section class="home-greeting">
       <div class="home-greeting-brand"><span class="home-book-mark">${icon('book')}</span><span><small>WELCOME BACK</small><strong>myQuran</strong></span></div>
-      <span class="home-date">${new Intl.DateTimeFormat('en', { weekday: 'short', month: 'short', day: 'numeric' }).format(new Date())}</span>
+      <span class="home-date"><span>${new Intl.DateTimeFormat('en', { weekday: 'short', month: 'short', day: 'numeric' }).format(new Date())}</span><small id="network-status">${navigator.onLine ? 'Online' : 'Offline · cached ayahs'}</small></span>
     </section>
     <div class="home-welcome"><span class="welcome-calligraphy" lang="ar" dir="rtl">اقرأ</span><span class="welcome-caption">A LITTLE CLOSER, EVERY DAY</span></div>
     <button class="home-last-read" data-action="resume-reading" data-surah="${homeSurah?.number || 1}" data-ayah="${resumeAyah}">
@@ -379,9 +447,12 @@ function renderHome() {
   message.innerHTML = ''
   list.innerHTML = `
     <section class="home-feature-section">
-      <div class="home-section-heading"><span>YOUR DAILY PRACTICE</span><small>7 ways to begin</small></div>
+      <div class="home-section-heading"><span>YOUR DAILY PRACTICE</span><small>10 ways to begin</small></div>
       <div class="home-feature-grid">
         <button class="home-feature-tile tile-quran" data-action="browse-surahs"><span class="feature-symbol">${icon('book')}</span><strong>Read Quran</strong><small>114 surahs</small></button>
+        <button class="home-feature-tile tile-search" data-action="search-quran"><span class="feature-symbol">${icon('search')}</span><strong>Quran search</strong><small>Find an ayah</small></button>
+        <button class="home-feature-tile tile-calendar" data-action="tools" data-tools-target="calendar"><span class="feature-symbol">☾</span><strong>Hijri calendar</strong><small>Islamic dates</small></button>
+        <button class="home-feature-tile tile-plan" data-action="tools" data-tools-target="plan"><span class="feature-symbol">◷</span><strong>Reading plan</strong><small>Build a daily habit</small></button>
         <button class="home-feature-tile tile-names" data-action="tools" data-tools-target="names"><span class="feature-symbol">﷽</span><strong>99 Names</strong><small>Asma ul Husna</small></button>
         <button class="home-feature-tile tile-prayer" data-action="tools" data-tools-target="prayer"><span class="feature-symbol">◷</span><strong>Prayer times</strong><small>Daily schedule</small></button>
         <button class="home-feature-tile tile-qibla" data-action="tools" data-tools-target="qibla"><span class="feature-symbol">⌖</span><strong>Qibla compass</strong><small>Find direction</small></button>
@@ -391,6 +462,7 @@ function renderHome() {
       </div>
     </section>`
   initWorshipTools((surah, ayah) => loadSurah(surah, ayah))
+  updateNetworkStatus()
 }
 
 function renderSurahDirectory() {
@@ -398,7 +470,7 @@ function renderSurahDirectory() {
   const heading = document.querySelector('#reader-heading')
   const message = document.querySelector('#reader-message')
   const list = document.querySelector('#ayah-list')
-  area.classList.remove('is-home', 'is-tools')
+  area.classList.remove('is-home', 'is-tools', 'is-search')
   area.classList.add('is-surahs')
   document.querySelector('.reader-overline').hidden = true
   document.querySelector('.reader-controls').hidden = true
@@ -426,9 +498,37 @@ function renderSurahDirectory() {
     </button>`).join('')}</div>` : '<p class="directory-empty">No surahs match that search.</p>'
 }
 
+function renderSearchPage() {
+  const area = document.querySelector('.reader-area')
+  area.classList.remove('is-home', 'is-tools', 'is-surahs')
+  area.classList.add('is-search')
+  document.querySelector('.reader-overline').hidden = true
+  document.querySelector('.reader-controls').hidden = true
+  document.querySelector('.reader-credit').hidden = true
+  document.querySelector('#reader-heading').innerHTML = `
+    <section class="surah-browser-heading">
+      <button class="back-button" data-action="home" aria-label="Back to home">${icon('arrowLeft')}</button>
+      <div><small>MY QURAN</small><strong>Search the Quran</strong></div>
+      <span class="browser-count">${escapeHtml(translations.find((item) => item.id === state.translation)?.name || 'Translation')}</span>
+    </section>
+    <form class="quran-search-form" id="quran-search-form">
+      <label class="surah-search">${icon('search')}<input id="quran-search-input" type="search" value="${escapeHtml(state.searchQuery)}" placeholder="Search a word or phrase" autocomplete="off" aria-label="Search the Quran" /></label>
+      <button type="submit" class="quran-search-submit">Search</button>
+    </form>`
+  document.querySelector('#reader-message').textContent = state.searchStatus
+  document.querySelector('#ayah-list').innerHTML = state.searchResults.length
+    ? `<div class="quran-search-results">${state.searchResults.map((match) => `
+      <button class="quran-search-result" data-action="search-result" data-surah="${match.surah.number}" data-ayah="${match.numberInSurah}">
+        <span class="search-result-reference"><strong>${escapeHtml(match.surah.englishName)}</strong><small>Ayah ${match.numberInSurah} · ${escapeHtml(match.surah.englishNameTranslation)}</small></span>
+        <span class="search-result-text">${escapeHtml(match.text)}</span>
+      </button>`).join('')}</div>`
+    : ''
+  document.querySelector('#quran-search-input')?.focus({ preventScroll: true })
+}
+
 function renderToolsPage() {
   const area = document.querySelector('.reader-area')
-  area.classList.remove('is-home', 'is-surahs')
+  area.classList.remove('is-home', 'is-surahs', 'is-search')
   area.classList.add('is-tools')
   document.querySelector('#reader-heading').innerHTML = ''
   document.querySelector('#reader-message').innerHTML = ''
@@ -467,6 +567,7 @@ function formatTime(seconds) {
 function updateActiveVerse(verseNumber, scroll = true) {
   state.activeVerse = verseNumber
   saveProgress(state.selectedSurah, verseNumber)
+  recordReadingVerse(state.verses.find((verse) => verse.number === verseNumber)?.globalNumber)
   document.querySelectorAll('.ayah').forEach((ayah) => {
     const current = Number(ayah.id.replace('ayah-', '')) === verseNumber
     ayah.classList.toggle('is-playing', current)
@@ -483,6 +584,7 @@ function updateActiveVerse(verseNumber, scroll = true) {
 async function playVerse(verseNumber = state.activeVerse) {
   const verse = state.verses.find((entry) => entry.number === verseNumber)
   if (!verse?.audio) return
+  state.repeatCount = 0
   if (state.playbackMode === 'quran') state.quranPlaylistActive = true
   if (state.activeVerse !== verseNumber) updateActiveVerse(verseNumber, false)
   audio.src = verse.audio
@@ -503,6 +605,59 @@ function startPlayback() {
     return
   }
   playVerse(state.activeVerse)
+}
+
+async function loadTafsir() {
+  const cacheKey = `${state.selectedSurah}:${state.tafsirEdition}`
+  if (state.tafsirLoadedFor === cacheKey || state.tafsirLoading) return
+  state.tafsirLoading = true
+  state.tafsirError = ''
+  renderReader()
+  try {
+    const result = await fetchQuranData(`${API}/surah/${state.selectedSurah}/${state.tafsirEdition}`)
+    if (result.code !== 200 || !Array.isArray(result.data?.ayahs)) throw new Error('This tafsir edition is unavailable.')
+    if (cacheKey !== `${state.selectedSurah}:${state.tafsirEdition}`) return
+    state.tafsirByVerse = Object.fromEntries(result.data.ayahs.map((ayah) => [ayah.numberInSurah, ayah.text]))
+    state.tafsirLoadedFor = cacheKey
+  } catch (error) {
+    if (cacheKey === `${state.selectedSurah}:${state.tafsirEdition}`) {
+      state.tafsirError = error.message || 'Tafsir could not be loaded.'
+    }
+  } finally {
+    state.tafsirLoading = false
+    renderReader()
+    if (state.expandedTafsir.size && !state.tafsirLoadedFor && !state.tafsirError && cacheKey !== `${state.selectedSurah}:${state.tafsirEdition}`) {
+      loadTafsir()
+    }
+  }
+}
+
+async function runQuranSearch() {
+  const query = state.searchQuery.trim()
+  const requestId = ++state.searchRequestId
+  window.clearTimeout(state.searchTimer)
+  if (query.length < 2) {
+    state.searchResults = []
+    state.searchStatus = query ? 'Enter at least two characters to search.' : ''
+    renderSearchPage()
+    return
+  }
+  state.searchStatus = 'Searching the Quran…'
+  renderSearchPage()
+  try {
+    const result = await fetchQuranData(`${API}/search/${encodeURIComponent(query)}/all/${state.translation}`)
+    if (requestId !== state.searchRequestId) return
+    if (result.code !== 200 || !Array.isArray(result.data?.matches)) throw new Error('Search returned an unexpected response.')
+    state.searchResults = result.data.matches
+    state.searchStatus = state.searchResults.length
+      ? `${result.data.count} matching verses`
+      : 'No verses found. Try another word or phrase.'
+  } catch (error) {
+    if (requestId !== state.searchRequestId) return
+    state.searchResults = []
+    state.searchStatus = error.message || 'Search is unavailable right now.'
+  }
+  if (state.page === 'search') renderSearchPage()
 }
 
 function toggleBookmark(globalNumber) {
@@ -530,6 +685,14 @@ function locateVerse(globalNumber) {
     verseNumber -= surah.numberOfAyahs
   }
   return null
+}
+
+function updateNetworkStatus() {
+  const status = document.querySelector('#network-status')
+  if (!status) return
+  const online = navigator.onLine
+  status.textContent = online ? 'Online' : 'Offline · cached ayahs'
+  status.classList.toggle('is-offline', !online)
 }
 
 renderShell()
@@ -562,6 +725,16 @@ document.addEventListener('click', (event) => {
     renderReader()
     renderPlayer()
   }
+  if (action === 'search-quran') {
+    state.page = 'search'
+    state.searchQuery = ''
+    state.searchResults = []
+    state.searchStatus = ''
+    closeMobileNav()
+    renderReader()
+    renderPlayer()
+  }
+  if (action === 'search-result') loadSurah(Number(button.dataset.surah), Number(button.dataset.ayah))
   if (action === 'back-surahs') {
     state.page = 'surahs'
     renderReader()
@@ -581,6 +754,22 @@ document.addEventListener('click', (event) => {
   }
   if (action === 'play-ayah') playVerse(Number(button.dataset.ayah))
   if (action === 'bookmark') toggleBookmark(Number(button.dataset.globalNumber))
+  if (action === 'toggle-tafsir') {
+    const verseNumber = Number(button.dataset.ayah)
+    if (state.expandedTafsir.has(verseNumber)) state.expandedTafsir.delete(verseNumber)
+    else {
+      state.expandedTafsir.add(verseNumber)
+      loadTafsir()
+    }
+    renderReader()
+  }
+  if (action === 'toggle-note') {
+    const globalNumber = Number(button.dataset.globalNumber)
+    if (state.openNotes.has(globalNumber)) state.openNotes.delete(globalNumber)
+    else state.openNotes.add(globalNumber)
+    renderReader()
+    if (state.openNotes.has(globalNumber)) document.querySelector(`#note-${globalNumber}`)?.focus()
+  }
   if (action === 'toggle-display') {
     if (button.dataset.display === 'translation') state.showTranslation = !state.showTranslation
     else state.showTransliteration = !state.showTransliteration
@@ -621,23 +810,59 @@ document.querySelector('#ayah-jump-form').addEventListener('submit', (event) => 
   document.querySelector('#ayah-jump-form').hidden = true
   document.querySelector('.ayah-jump-trigger').setAttribute('aria-expanded', 'false')
 })
+document.addEventListener('submit', (event) => {
+  if (event.target.id === 'quran-search-form') {
+    event.preventDefault()
+    state.searchQuery = document.querySelector('#quran-search-input').value
+    runQuranSearch()
+  }
+  if (!event.target.matches('[data-note-form]')) return
+  event.preventDefault()
+  const globalNumber = Number(event.target.dataset.noteForm)
+  const note = event.target.querySelector('textarea').value.trim()
+  if (note) state.notes[globalNumber] = note
+  else delete state.notes[globalNumber]
+  localStorage.setItem(STORAGE.notes, JSON.stringify(state.notes))
+  state.openNotes.delete(globalNumber)
+  renderReader()
+})
 
 document.querySelector('#chapter-search').addEventListener('input', () => {
   renderSidebar()
   if (state.page === 'home') renderHome()
 })
 document.addEventListener('input', (event) => {
-  if (event.target.id !== 'surah-search') return
-  state.surahQuery = event.target.value
-  const position = event.target.selectionStart
-  renderSurahDirectory()
-  const search = document.querySelector('#surah-search')
-  search.focus()
-  search.setSelectionRange(position, position)
+  if (event.target.id === 'surah-search') {
+    state.surahQuery = event.target.value
+    const position = event.target.selectionStart
+    renderSurahDirectory()
+    const search = document.querySelector('#surah-search')
+    search.focus()
+    search.setSelectionRange(position, position)
+  }
+  if (event.target.id === 'quran-search-input') {
+    state.searchQuery = event.target.value
+    window.clearTimeout(state.searchTimer)
+    state.searchTimer = window.setTimeout(runQuranSearch, 350)
+  }
 })
 document.querySelector('#text-size').addEventListener('input', (event) => {
   state.fontSize = Number(event.target.value)
   document.querySelector('#ayah-list').style.setProperty('--arabic-size', `${state.fontSize}px`)
+})
+document.querySelector('#translation-select').addEventListener('change', (event) => {
+  state.translation = event.target.value
+  localStorage.setItem(STORAGE.translation, state.translation)
+  if (state.page === 'search') runQuranSearch()
+  else loadSurah(state.selectedSurah, state.activeVerse)
+})
+document.querySelector('#tafsir-select').addEventListener('change', (event) => {
+  state.tafsirEdition = event.target.value
+  state.tafsirByVerse = {}
+  state.tafsirLoadedFor = ''
+  state.tafsirError = ''
+  if (state.expandedTafsir.size) loadTafsir()
+  else renderReader()
 })
 document.querySelector('#reciter-select').addEventListener('change', (event) => {
   state.reciter = event.target.value
@@ -655,6 +880,11 @@ document.querySelector('#playback-mode-select').addEventListener('change', (even
     state.playbackMode = nextMode
   }
   localStorage.setItem(STORAGE.playbackMode, state.playbackMode)
+})
+document.querySelector('#repeat-mode-select').addEventListener('change', (event) => {
+  state.repeatMode = ['verse', '3', '5'].includes(event.target.value) ? event.target.value : 'off'
+  state.repeatCount = 0
+  localStorage.setItem(STORAGE.repeat, state.repeatMode)
 })
 document.querySelector('#audio-progress').addEventListener('input', (event) => {
   if (Number.isFinite(audio.duration)) audio.currentTime = (Number(event.target.value) / 1000) * audio.duration
@@ -686,6 +916,16 @@ audio.addEventListener('timeupdate', () => {
   if (durationTime) durationTime.textContent = formatTime(audio.duration)
 })
 audio.addEventListener('ended', () => {
+  const repeatLimit = state.repeatMode === 'verse' ? Infinity : Number(state.repeatMode) - 1
+  if (state.repeatMode !== 'off' && state.repeatCount < repeatLimit) {
+    state.repeatCount += 1
+    audio.currentTime = 0
+    audio.play().catch(() => {
+      document.querySelector('#reader-message').innerHTML = '<div class="reader-state error-state">Audio could not continue. Press play to resume.</div>'
+    })
+    return
+  }
+  state.repeatCount = 0
   if (state.playbackMode === 'quran' && state.activeVerse >= state.verses.length && state.selectedSurah < 114) {
     loadSurah(state.selectedSurah + 1, 1, true)
   } else if (['surah', 'quran'].includes(state.playbackMode) && state.activeVerse < state.verses.length) {
@@ -722,6 +962,13 @@ if ('mediaSession' in navigator) {
 
 renderPlayer()
 renderReader()
+window.addEventListener('online', updateNetworkStatus)
+window.addEventListener('offline', updateNetworkStatus)
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL }).catch(() => {})
+  })
+}
 fetchSurahs().then(() => {
   state.libraryLoading = false
   state.error = ''
